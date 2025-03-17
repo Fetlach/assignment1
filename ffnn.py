@@ -31,11 +31,26 @@ class FFNN(nn.Module):
         return self.loss(predicted_vector, gold_label)
 
     def forward(self, input_vector):
+        # Summary from docs: the forward method is overridden to define how a nn module transforms an input into an output
+        # h is the hidden size
+        # according to assignment details:
+        # input = input_vector = subset of R^(vocabSize)
+        # hidden layer = self.h = R^|(hidden sigma layer dimension)|
+        # output layer = predicted_vector? = R^|(Probability distribution)|
+
         # [to fill] obtain first hidden layer representation
+        # W1 is nn.Linear(input_dim, h) which runs a linear transformation on the input using the hidden layer h
+        # We then run the activation function
+        predicted_vector = self.activation(self.W1(input_vector))
 
         # [to fill] obtain output layer representation
+        # W2 is nn.linear(h, self.output_dim) which runs another linear transformation to create a correct output vector
+        predicted_vector = self.W2(predicted_vector)
 
         # [to fill] obtain probability dist.
+        # softmax is nn.LogSoftmax which gets a probability distribution in logarithmic space of the input
+        # this is done because we're doing a classification task
+        predicted_vector = self.softmax(predicted_vector)
 
         return predicted_vector
 
@@ -80,20 +95,25 @@ def convert_to_vector_representation(data, word2index):
 
 
 
-def load_data(train_data, val_data):
+def load_data(train_data, val_data, test_data):
     with open(train_data) as training_f:
         training = json.load(training_f)
     with open(val_data) as valid_f:
         validation = json.load(valid_f)
+    with open(test_data) as test_f:
+        testing = json.load(test_f)
 
     tra = []
     val = []
+    tes = []
     for elt in training:
         tra.append((elt["text"].split(),int(elt["stars"]-1)))
     for elt in validation:
         val.append((elt["text"].split(),int(elt["stars"]-1)))
+    for elt in testing:
+        tes.append((elt["text"].split(),int(elt["stars"]-1)))
 
-    return tra, val
+    return tra, val, tes
 
 
 if __name__ == "__main__":
@@ -102,9 +122,21 @@ if __name__ == "__main__":
     parser.add_argument("-e", "--epochs", type=int, required = True, help = "num of epochs to train")
     parser.add_argument("--train_data", required = True, help = "path to training data")
     parser.add_argument("--val_data", required = True, help = "path to validation data")
-    parser.add_argument("--test_data", default = "to fill", help = "path to test data")
+    parser.add_argument("--test_data", required = True, help = "path to test data")
     parser.add_argument('--do_train', action='store_true')
     args = parser.parse_args()
+
+    # set up tracking variables
+    TotalTimeTaken = 0.0
+    AverageAccValid = 1.0
+    AverageAccTest = 1.0
+    MinSpeed = 0.0
+    MaxSpeed = 0.0
+    AvgSpeed = 0.0
+    fAccTrain = 0.0
+    fAccValid = 0.0
+    fAccTest = 0.0
+    times = []
 
     # fix random seeds
     random.seed(42)
@@ -112,13 +144,14 @@ if __name__ == "__main__":
 
     # load data
     print("========== Loading data ==========")
-    train_data, valid_data = load_data(args.train_data, args.val_data) # X_data is a list of pairs (document, y); y in {0,1,2,3,4}
+    train_data, valid_data, test_data = load_data(args.train_data, args.val_data, args.test_data) # X_data is a list of pairs (document, y); y in {0,1,2,3,4}
     vocab = make_vocab(train_data)
     vocab, word2index, index2word = make_indices(vocab)
 
     print("========== Vectorizing data ==========")
     train_data = convert_to_vector_representation(train_data, word2index)
     valid_data = convert_to_vector_representation(valid_data, word2index)
+    test_data = convert_to_vector_representation(test_data, word2index)
     
 
     model = FFNN(input_dim = len(vocab), h = args.hidden_dim)
@@ -131,6 +164,7 @@ if __name__ == "__main__":
         correct = 0
         total = 0
         start_time = time.time()
+        tempTime = 0.0
         print("Training started for epoch {}".format(epoch + 1))
         random.shuffle(train_data) # Good practice to shuffle order of training data
         minibatch_size = 16 
@@ -155,7 +189,10 @@ if __name__ == "__main__":
         print("Training completed for epoch {}".format(epoch + 1))
         print("Training accuracy for epoch {}: {}".format(epoch + 1, correct / total))
         print("Training time for this epoch: {}".format(time.time() - start_time))
-
+        if epoch is args.epochs - 1:
+            fAccTrain = correct / total
+        tempTime += time.time() - start_time
+        
 
         loss = None
         correct = 0
@@ -182,6 +219,68 @@ if __name__ == "__main__":
         print("Validation completed for epoch {}".format(epoch + 1))
         print("Validation accuracy for epoch {}: {}".format(epoch + 1, correct / total))
         print("Validation time for this epoch: {}".format(time.time() - start_time))
+        if epoch is args.epochs - 1:
+            fAccValid = correct / total
+        tempTime += time.time() - start_time
+
+        TotalTimeTaken += tempTime
+        if tempTime > MaxSpeed or MaxSpeed < 0.25:
+            MaxSpeed = tempTime
+        if tempTime < MinSpeed or MinSpeed < 0.25:
+            MinSpeed = tempTime
+        times.append(tempTime)
+        
+
 
     # write out to results/test.out
+
+    # bookkeeping
+    for t in times:
+        AvgSpeed += t / len(times)
+
+    # begin test
+    random.shuffle(test_data) # Good practice to shuffle order of training data
+    correct = 0
+    total = 0
+    N = len(test_data)
+    minibatch_size = 16 
+    for minibatch_index in tqdm(range(N // minibatch_size)):
+        for example_index in range(minibatch_size):
+            input_vector, gold_label = test_data[minibatch_index * minibatch_size + example_index]
+            predicted_vector = model(input_vector)
+            predicted_label = torch.argmax(predicted_vector)
+            correct += int(predicted_label == gold_label)
+            total += 1
+    print("Final test accuracy: ", (correct / total))
+    fAccTest = (correct / total)
+
+    result_dict = {
+        "Model": "FFNN",
+        "Hidden Layers": args.hidden_dim,
+        "Training Epochs": args.epochs,
+        "Training Time Total": TotalTimeTaken,
+        "Min Epoch Train Speed": MinSpeed,
+        "Max Epoch Train Speed": MaxSpeed,
+        "Final Training Accuracy": fAccTrain,
+        "Final Validation Accuracy": fAccValid,
+        "Final Test Accuracy": fAccTest
+    }
+
+    json_data = json.dumps(result_dict, indent=4)
+
+    try:
+        with open("outputFile.json", "rt", encoding = "utf-8") as json_file:
+            data = json.load(json_file)
+        print("Data: %s" % data)
+    except IOError:
+        print("Could not read file, starting from scratch")
+        data = {}
+
+    # Append
+    data["2"] = json_data
+
+    # overwrite
+    with open("outputFile.json", "w", encoding = "utf-8") as json_file: # Don't change the name here
+        json.dump(data, json_file, ensure_ascii=False, indent=4) # Use indent for pretty-printing
+
     
